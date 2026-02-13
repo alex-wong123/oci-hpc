@@ -83,6 +83,7 @@ resource "oci_core_security_list" "public-security-list" {
       min = "80"
     }
   }
+  
   ingress_security_rules {
     protocol    = "6"
     source      = var.ssh_cidr
@@ -92,15 +93,7 @@ resource "oci_core_security_list" "public-security-list" {
       min = "443"
     }
   }
-  ingress_security_rules {
-    protocol    = "6"
-    source      = var.ssh_cidr
-    description = "Open port for alerts"
-    tcp_options {
-      max = "5000"
-      min = "5000"
-    }
-  }
+  
   ingress_security_rules {
     protocol = "1"
     source   = "0.0.0.0/0"
@@ -289,7 +282,6 @@ resource "oci_dns_rrset" "fss-dns-round-robin" {
       ttl    = 1
     }
   }
-  scope   = "PRIVATE"
   view_id = data.oci_dns_views.dns_views.views[0].id
 }
 
@@ -304,7 +296,6 @@ resource "oci_dns_rrset" "controller" {
     rdata  = oci_core_instance.controller.private_ip
     ttl    = 3600
   }
-  scope   = "PRIVATE"
   view_id = data.oci_dns_views.dns_views.views[0].id
 }
 
@@ -312,5 +303,11 @@ resource "null_resource" "dns_ready" {
   triggers = {
     fss_rrset        = try(oci_dns_rrset.fss-dns-round-robin[0].id, "")
     controller_rrset = try(oci_dns_rrset.controller[0].id, "")
+    monitoring_rrset = try(oci_dns_rrset.rrset-monitoring[0].id, "")
   }
+}
+
+resource "time_sleep" "dns_sleep" {
+  depends_on = [null_resource.dns_ready]
+  create_duration = "120s"
 }

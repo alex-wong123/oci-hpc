@@ -11,7 +11,7 @@ resource "oci_core_volume_backup_policy" "controller_boot_volume_backup_policy" 
   freeform_tags = {
     "cluster_name"    = local.cluster_name
     "controller_name" = "${local.cluster_name}-controller"
-  }    
+  }
 }
 
 resource "oci_core_volume_backup_policy_assignment" "boot_volume_backup_policy" {
@@ -38,7 +38,7 @@ resource "oci_ons_notification_topic" "grafana_alerts" {
   freeform_tags = {
     "cluster_name"    = local.cluster_name
     "controller_name" = "${local.cluster_name}-controller"
-  }  
+  }
 }
 
 resource "null_resource" "boot_volume_backup_policy" {
@@ -77,7 +77,7 @@ resource "oci_core_instance" "controller" {
 
   metadata = {
     ssh_authorized_keys = "${var.ssh_key}\n${tls_private_key.ssh.public_key_openssh}${var.compute_node_ssh_key}"
-    user_data           = base64encode(templatefile("${path.module}/config.controller", {
+    user_data = base64encode(templatefile("${path.module}/config.controller", {
       key = tls_private_key.ssh.private_key_pem
     }))
   }
@@ -96,7 +96,7 @@ resource "oci_core_instance" "controller" {
 }
 
 resource "null_resource" "controller" {
-  depends_on = [oci_core_instance.controller, null_resource.fss_home_dependency, null_resource.fss_config_dependency]
+  depends_on = [oci_core_instance.controller, null_resource.fss_home_dependency, null_resource.fss_config_dependency, time_sleep.dns_sleep]
   triggers = {
     controller = oci_core_instance.controller.id
   }
@@ -112,7 +112,8 @@ resource "null_resource" "controller" {
       ],
       var.create_fss == "new" ? [
         "echo \"${local.config_target_name}:/config /config nfs defaults,nconnect=16 0 0\" | sudo tee -a /etc/fstab",
-        "sudo mount /config",
+        "sudo systemctl daemon-reload",
+        "for i in {1..30}; do sudo mount /config ; mountpoint -q /config && break || { echo 'Waiting for /config to be mounted...'; sleep 10 ; }; done"
       ] : [],
       [
         "sudo chown ${var.controller_username}:${var.controller_username} /config",
@@ -130,7 +131,7 @@ resource "null_resource" "controller" {
       type        = "ssh"
       user        = var.controller_username
       private_key = tls_private_key.ssh.private_key_pem
-      timeout     = "10m"
+      timeout     = "20m"
     }
   }
   provisioner "file" {
@@ -346,40 +347,40 @@ resource "null_resource" "cluster" {
 
   provisioner "file" {
     content = templatefile("${path.module}/conf/initial_configs.conf", {
-      rdma_enabled                = var.rdma_enabled,
-      stand_alone                 = var.stand_alone,
-      marketplace_listing         = var.marketplace_listing,
-      image                       = local.image_ocid,
-      use_marketplace_image       = var.use_marketplace_image,
-      boot_volume_size            = var.boot_volume_size,
-      shape                       = var.rdma_enabled ? var.cluster_network_shape : var.instance_pool_shape,
-      region                      = var.region,
-      ad                          = var.ad,
-      private_subnet              = data.oci_core_subnet.private_subnet.cidr_block,
-      private_subnet_id           = local.subnet_id,
-      targetCompartment           = var.targetCompartment,
-      instance_pool_ocpus         = local.instance_pool_ocpus,
-      instance_pool_memory        = var.instance_pool_memory,
-      instance_pool_custom_memory = var.instance_pool_custom_memory,
-      queue                       = var.queue,
-      hyperthreading              = var.hyperthreading,
-      cluster_name                = local.cluster_name,
-      change_hostname             = var.change_hostname,
-      hostname_convention         = var.hostname_convention,
-      ondemand_partition          = var.ondemand_partition,
-      ondemand_partition_count    = var.ondemand_partition_count,
-      preemptible                 = var.preemptible
-      public_subnet               = data.oci_core_subnet.public_subnet.cidr_block,
-      public_subnet_id            = local.controller_subnet_id
-      login_shape                 = var.login_shape,
-      login_ad                    = var.login_ad,
-      login_image                 = local.controller_image
-      login_boot_volume_size      = var.login_boot_volume_size
-      use_marketplace_image_login = var.use_marketplace_image
-      login_instance_pool_ocpus   = local.instance_pool_ocpus
-      login_instance_pool_memory  = var.login_memory
+      rdma_enabled                      = var.rdma_enabled,
+      stand_alone                       = var.stand_alone,
+      marketplace_listing               = var.marketplace_listing,
+      image                             = local.image_ocid,
+      use_marketplace_image             = var.use_marketplace_image,
+      boot_volume_size                  = var.boot_volume_size,
+      shape                             = var.rdma_enabled ? var.cluster_network_shape : var.instance_pool_shape,
+      region                            = var.region,
+      ad                                = var.ad,
+      private_subnet                    = data.oci_core_subnet.private_subnet.cidr_block,
+      private_subnet_id                 = local.subnet_id,
+      targetCompartment                 = var.targetCompartment,
+      instance_pool_ocpus               = local.instance_pool_ocpus,
+      instance_pool_memory              = var.instance_pool_memory,
+      instance_pool_custom_memory       = var.instance_pool_custom_memory,
+      queue                             = var.queue,
+      hyperthreading                    = var.hyperthreading,
+      cluster_name                      = local.cluster_name,
+      change_hostname                   = var.change_hostname,
+      hostname_convention               = var.hostname_convention,
+      ondemand_partition                = var.ondemand_partition,
+      ondemand_partition_count          = var.ondemand_partition_count,
+      preemptible                       = var.preemptible
+      public_subnet                     = data.oci_core_subnet.public_subnet.cidr_block,
+      public_subnet_id                  = local.controller_subnet_id
+      login_shape                       = var.login_shape,
+      login_ad                          = var.login_ad,
+      login_image                       = local.controller_image
+      login_boot_volume_size            = var.login_boot_volume_size
+      use_marketplace_image_login       = var.use_marketplace_image
+      login_instance_pool_ocpus         = local.instance_pool_ocpus
+      login_instance_pool_memory        = var.login_memory
       login_instance_pool_custom_memory = var.login_custom_memory
-      marketplace_listing_login   = var.marketplace_listing
+      marketplace_listing_login         = var.marketplace_listing
     })
 
     destination = "/config/conf/initial_configs.conf"
@@ -391,12 +392,12 @@ resource "null_resource" "cluster" {
     }
   }
 
-    provisioner "file" {
+  provisioner "file" {
     content = templatefile("${path.module}/conf/marketplace.conf", {
-      hpc_option1 = var.marketplace_version_id["HPC_OL8"]
-      gpu_option1 = var.marketplace_version_id["GPU_OL8_NV550"]
-      gpu_option2 = var.marketplace_version_id["GPU_OL8_NV570"]
-      gpu_option3 = var.marketplace_version_id["GPU_OL8_AMD632"]
+      hpc_option1    = var.marketplace_version_id["HPC_OL8"]
+      gpu_option1    = var.marketplace_version_id["GPU_OL8_NV550"]
+      gpu_option2    = var.marketplace_version_id["GPU_OL8_NV570"]
+      gpu_option3    = var.marketplace_version_id["GPU_OL8_AMD632"]
       listing_id_HPC = var.marketplace_listing_id_HPC
       listing_id_GPU = var.marketplace_listing_id_GPU
     })
@@ -419,16 +420,24 @@ resource "null_resource" "cluster" {
       "cp /opt/oci-hpc/bin/login.sh /config/bin",
       "cp /opt/oci-hpc/bin/monitoring.sh /config/bin",
       "cp /opt/oci-hpc/bin/custom_ansible.sh /config/bin",
+      "cp /opt/oci-hpc/bin/setup_ansible.sh /config/bin",
+      "cp /opt/oci-hpc/bin/setup_environment.sh /config/bin",
+      "cp /opt/oci-hpc/bin/setup_os_packages.sh /config/bin",
+      "cp /opt/oci-hpc/bin/setup_python_packages.sh /config/bin",
+      "cp /opt/oci-hpc/bin/setup_run_ansible.sh /config/bin",
+      "cp /opt/oci-hpc/bin/uv_wrapper.sh /config/bin",
       "sudo chown ${var.controller_username}:${var.controller_username} /config/bin/compute.sh",
       "sudo chown ${var.controller_username}:${var.controller_username} /config/bin/login.sh",
       "sudo chown ${var.controller_username}:${var.controller_username} /config/bin/monitoring.sh",
       "sudo chown ${var.controller_username}:${var.controller_username} /config/bin/custom_ansible.sh",
+      "sudo chown ${var.controller_username}:${var.controller_username} /config/bin/uv_wrapper.sh",
       "sudo chmod 775 /config/bin/compute.sh",
       "sudo chmod 775 /config/bin/login.sh",
       "sudo chmod 775 /config/bin/monitoring.sh",
       "sudo chmod 775 /config/bin/custom_ansible.sh",
       "sudo chmod 600 /config/key/cluster.key",
       "sudo chmod 775 /config/bin/cloud-init.sh",
+      "sudo chmod 775 /config/bin/uv_wrapper.sh",
       "sudo chmod 777 /config/playbooks",
       "sudo chown ${var.controller_username}:${var.controller_username} /config/key/cluster.key",
       "sudo cp -pr /home/${var.controller_username}/.ssh/cluster.key /home/${var.controller_username}/.ssh/id_ed25519",
@@ -500,6 +509,5 @@ resource "oci_dns_rrset" "rrset-controller" {
     rdata  = oci_core_instance.controller.private_ip
     ttl    = 3600
   }
-  scope   = "PRIVATE"
   view_id = data.oci_dns_views.dns_views.views[0].id
 }

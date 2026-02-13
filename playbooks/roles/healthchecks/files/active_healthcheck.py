@@ -9,6 +9,8 @@ import logging
 import getpass
 import time
 import stat
+import tempfile
+import glob
 
 # Configure logger for active_healthcheck
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -159,6 +161,21 @@ def run_local_nccl_test(shape):
             "var_UCX_NET_DEVICES": "mlx5_0:1",
             "var_NCCL_IB_HCA": "=mlx5_0,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_7,mlx5_8,mlx5_9",
             "threshold": 350
+        }  ,
+        "BM.GPU.MI355X.8": {
+            "var_UCX_NET_DEVICES": "mlx5_8:1",
+            "var_NCCL_IB_HCA": "=mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7",
+            "threshold": 350
+        }    ,
+        "BM.GPU.MI355X-v0.8": {
+            "var_UCX_NET_DEVICES": "mlx5_8:1",
+            "var_NCCL_IB_HCA": "=mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7",
+            "threshold": 350
+        }    ,
+        "BM.GPU.MI355X-v1.8": {
+            "var_UCX_NET_DEVICES": "mlx5_8:1",
+            "var_NCCL_IB_HCA": "=mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7",
+            "threshold": 350
         }    
     }
 
@@ -218,7 +235,10 @@ def run_local_nccl_test(shape):
     
 def run_local_rccl_test(shape):
     shape_mapping = {
-        "BM.GPU.MI300X.8": {"threshold": 310}
+        "BM.GPU.MI300X.8": {"threshold": 310},
+        "BM.GPU.MI355X.8": {"threshold": 310},
+        "BM.GPU.MI355X-v0.8": {"threshold": 310},
+        "BM.GPU.MI355X-v1.8": {"threshold": 310}
     }
 
     result = None  # ensure defined
@@ -349,8 +369,6 @@ cargo install gpu-fryer --root /opt/gpu-fryer
             return False,"GPU Fryer failed"
     except subprocess.TimeoutExpired:
         logger.error(f"GPU Fryer test timed out after {run_time+20} seconds")
-        output = result.stdout.decode('utf-8')
-        print('\n'.join(output.splitlines()[-20:]))
         return False, f"Timeout after {run_time+20} seconds"
     except Exception as e:
         logger.error(f"Failed to run local GPU Fryer test: {e}")
@@ -392,10 +410,6 @@ def run_gpu_sdc_check(gpu_ids=None):
         logger.warning(message)
         return None, message, {}
 
-import shutil
-import tempfile
-
-import tempfile
 
 def run_local_rvs_test(shape):
     """
@@ -513,6 +527,212 @@ def run_local_rvs_test(shape):
                 logger.debug("Removed temp config %s", config_path)
         except Exception:
             logger.debug("Could not remove temp config %s", config_path)
+
+def escape_rich_markup_tags(text):
+    return text.replace("[", "(").replace("]", ")")
+
+def get_fio_command(nvme_devices):
+    """
+    Receive a nvme_devices list as argument and return the 
+    fio command to be executed to evaluate the read performance of the
+    nvme drives.
+
+    nvme_devices = {
+       "/dev/nvme0n1": {
+            "numjobs": 16,
+            "iodepth": 16
+        },
+        "/dev/nvme1n1": {
+            "numjobs": 16,
+            "iodepth": 16
+        }
+    """
+
+    nvme_config = []
+    for index, device in enumerate(nvme_devices.keys()):
+        if index != 0:
+            nvme_config.append("stonewall")
+        nvme_config.extend([
+            f"[{device}]",
+            "new_group",
+            f"filename={device}",
+            f"numjobs={nvme_devices[device].get('numjobs')}",
+            f"iodepth={nvme_devices[device].get('iodepth')}",
+            ""
+        ])
+    fio_command = "sudo fio --output-format=json - | jq '[.jobs[] | {iops: .read.iops, drive: .jobname}]'"
+    fio_command_lines = [
+        "[global]",
+        "name=nvme-rand-read",
+        "time_based=1",
+        "ramp_time=5",
+        "runtime=30",
+        "readwrite=randread",
+        "random_generator=lfsr",
+        "bs=4k",
+        "ioengine=libaio",
+        "direct=1",
+        "group_reporting=1",
+        "",
+        *nvme_config,
+    ]
+    return fio_command, "\n".join(fio_command_lines)
+
+def run_fio_command(fio_command, fio_config, timeout):
+    """Run fio with config piped to stdin."""
+    user_is_default, default_user = is_user_default()
+    
+    base_cmd = ["bash", "-lc", fio_command]
+    if not user_is_default:
+        base_cmd = ["sudo", "-u", default_user] + base_cmd
+    
+    result = subprocess.run(
+        base_cmd,
+        input=fio_config.encode(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout
+    )
+    return result
+
+def run_nvme_tests(shape, test_read=False, deviation_threshold_percentage=2):
+    default_numjobs = 16
+    default_iodepth = 16
+
+    nvme_known_thresholds = {
+        "INTEL SSDPF2KX038T1S": {
+            "iops_threshold": 1_538_000,
+            "numjobs": "16",
+            "iodepth": "16"
+        },
+        "SAMSUNG MZWLR3T8HBLS-00AU3": {
+            "iops_threshold": 430_000,
+            "numjobs": "16",
+            "iodepth": "16"
+        },
+        "SAMSUNG MZWLR3T8HCLS-00AU3": {
+            "iops_threshold": 1_202_000,
+            "numjobs": "16",
+            "iodepth": "16"
+        },
+        "SAMSUNG MZWLJ7T6HALA-00AU3": {
+            "iops_threshold": 430_000,
+            "numjobs": "16",
+            "iodepth": "16"
+        },
+        "7361456_ICRPC2DD2ORA6.4T": {
+            "iops_threshold": 801_000,
+            "numjobs": "16",
+            "iodepth": "16"
+        }
+    }
+
+    nvmes_number = {
+        "BM.GPU.B4.8": 4,
+        "BM.GPU.A100-v2.8": 4,
+        "BM.GPU4.8": 4,
+        "BM.GPU.H100.8": 16,
+        "BM.GPU.H200.8": 8,
+        "BM.GPU.B200.8": 8,
+        "BM.GPU.GB200.4": 4,
+        "BM.GPU.GB200-v2.4": 4,
+        "BM.GPU.GB200-v3.4": 4,
+        "BM.GPU.GB300.4": 4,
+        "BM.Optimized3.36": 1,
+        "BM.HPC.E5.144": 1,
+        "BM.GPU.MI300X.8": 8,
+        "BM.HPC2.36": 1
+    }
+
+    result = None
+    try:
+        # Getting the NVME devices using nvme-cli
+        detected_nvmes_dict = {}
+        result = run_as_default_user("sudo nvme list -o json")
+        if result.returncode == 0:
+            output = json.loads(result.stdout.decode('utf-8')) if result.stdout else {}
+            for device in output.get("Devices", []):
+                detected_nvmes_dict[device.get("DevicePath")] = {
+                    "model": device.get("ModelNumber"),
+                    "numjobs": nvme_known_thresholds.get(device.get("ModelNumber"), {}).get("numjobs", default_numjobs),
+                    "iodepth": nvme_known_thresholds.get(device.get("ModelNumber"), {}).get("iodepth", default_iodepth)
+                }
+        else:
+            nvme_devices = glob.glob("/dev/nvme*n1")
+            for nvme_device_path in nvme_devices:
+                detected_nvmes_dict[nvme_device_path] = {
+                    "numjobs": default_numjobs,
+                    "iodepth": default_iodepth
+                }
+        
+        if not detected_nvmes_dict:
+            return True, "No NVME Drive found."
+
+        # Check the NVMEs number
+        if shape.rstrip("-NC") in nvmes_number:
+            if nvmes_number[shape.rstrip("-NC")] != len(detected_nvmes_dict.keys()):
+                return False, "Wrong number of NVME drives detected for this shape."
+        else:
+            if len(detected_nvmes_dict.keys())%2 != 0:
+                logger.warning("Odd Number of NVME drives detected.")
+        
+        if not test_read:
+            return True, "NVME drives detected, performance read test skipped."
+        
+        # Check if FIO is installed
+        result = run_as_default_user("which fio")
+        if result.returncode != 0:
+            return False, "FIO is not installed."
+            
+        # Run FIO read tests
+        fio_command, fio_config = get_fio_command(detected_nvmes_dict)
+        result = run_fio_command(fio_command, fio_config, 1800)
+        if result.returncode == 0:
+            import statistics
+            
+            fio_command_output = json.loads(result.stdout.decode("utf-8")) if result.stdout else []
+            median = statistics.median([entry['iops'] for entry in fio_command_output])
+
+            outliers = []
+
+            for disk_test_result in fio_command_output:
+                model = detected_nvmes_dict.get(disk_test_result.get("drive")).get("model", "")
+                reference = nvme_known_thresholds.get(model, {}).get("iops_threshold", median)
+                if reference == 0:
+                    reference = median if median > 0 else disk_test_result["iops"]
+
+                deviation_percent = abs((disk_test_result["iops"] - reference) / reference) * 100
+
+                if deviation_percent > deviation_threshold_percentage:
+                    outliers.append(f'{disk_test_result["drive"]} > {disk_test_result["iops"]} IOPS (deviation: {deviation_percent:.2f}%)')
+
+            if outliers:
+                return False, "NVME outliers: " + escape_rich_markup_tags("; ".join(outliers))
+            else:
+                return True, "NVME read performance test passed."
+        else:
+            logger.error(f"NVME FIO read test failed")
+            stdout = result.stdout.decode('utf-8') if result.stdout else ""
+            stderr = result.stderr.decode('utf-8') if result.stderr else ""
+            combined = "\n".join([stdout, stderr]).strip()
+            tail = "\n".join(combined.splitlines()[-20:])
+            logger.error(escape_rich_markup_tags(f"NVME FIO read test failed (rc={result.returncode}). Tail:\n{tail}"))
+            return False, "fio test command execution failed."
+
+
+    except subprocess.TimeoutExpired:
+        logger.error("NVME FIO test timed out after 30 minutes")
+        if result and result.stdout:
+            out = result.stdout.decode('utf-8')
+            logger.error('\n'.join(out.splitlines()[-20:]))
+        return False, "Timeout after 30 minutes"
+    except Exception as e:
+        logger.error(f"Failed to run local NVME FIO test: {e}")
+        if result and result.stdout:
+            out = result.stdout.decode('utf-8')
+            logger.error('\n'.join(out.splitlines()[-20:]))
+            return False, escape_rich_markup_tags(str(e))
+        return False, escape_rich_markup_tags(str(e))
 
 
 def recommended_action(current, action):
@@ -644,6 +864,17 @@ if __name__ == '__main__':
         else:
             logger.info(f"{hostname} - RVS Test Succeeded: {rvs_output}")
 
+    nvme_state, nvme_output = run_nvme_tests(shape, test_read=True, deviation_threshold_percentage=2)
+    if not nvme_state:
+        if "Wrong number" in nvme_output:
+            logger.error(f"{hostname} - NVME Test Failed: {nvme_output}")
+            slurm_reason("One or more NVME drives failed.")
+            action = recommended_action(action, "Tag_and_Terminate")
+        else:
+            logger.error(f"{hostname} - NVME FIO Test Failed: {nvme_output}")
+    else:
+        logger.info(f"{hostname} - NVME Test Succeeded: {nvme_output}")
+    
     if action == "Reboot":
         number_of_reboots,last_2hour_reboot = get_reboots_count()
         if last_2hour_reboot > 0 or number_of_reboots > 5:

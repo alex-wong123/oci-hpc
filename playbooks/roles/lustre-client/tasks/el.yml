@@ -78,7 +78,7 @@
       until: result is not failed
       when: download_path == '/tmp'
 
-- name: untar Lustre client DKMS file in the shared directory created above
+- name: Untar Lustre client DKMS file in the shared directory created above
   unarchive:
     src: "{{ download_path }}/OL8-Lustre-client-dkms/OL8-Lustre-client-dkms.tgz"
     dest: "{{ download_path }}/OL8-Lustre-client-dkms"
@@ -86,7 +86,7 @@
   run_once: true
   when: download_path != '/tmp' and lustre_installed.rc != 0
 
-- name: untar Lustre client DKMS file in the local directory created above
+- name: Untar Lustre client DKMS file in the local directory created above
   unarchive:
     src: "{{ download_path }}/OL8-Lustre-client-dkms/OL8-Lustre-client-dkms.tgz"
     dest: "{{ download_path }}/OL8-Lustre-client-dkms"
@@ -110,11 +110,14 @@
     name: safe_yum
   when: ansible_facts['distribution_major_version'] == '8' and lustre_installed.rc != 0
 
-- name: Create and update Lustre configuration file
-  copy:
-    content: "options lnet networks={{ (lnet_protocol | split('@'))[1] }}({{ ansible_facts['default_ipv4']['interface'] }})\n"
-    dest: /etc/modprobe.d/lustre.conf
-    force: false
+- name: Ensure Lustre configuration line is present in lnet.conf
+  lineinfile:
+    dest: /etc/modprobe.d/lnet.conf
+    regexp: '^options lnet networks='
+    line: "options lnet networks={{ (lnet_protocol | split('@'))[1] }}({{ ansible_facts['default_ipv4']['interface'] }})"
+    create: true
+    state: present
+    mode: '0644'
 
 - name: Create Lustre mount directory
   become: true

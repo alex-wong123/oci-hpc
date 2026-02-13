@@ -17,6 +17,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import mapped_column, sessionmaker, DeclarativeBase, aliased
 from sqlalchemy.inspection import inspect
 from sqlalchemy.dialects.mysql import INTEGER
+from sqlalchemy.engine.row import Row
 
 from ClusterShell.NodeSet import NodeSet
 
@@ -70,6 +71,7 @@ class NodesMixin:
     gpu_memory_fabric          = mapped_column(String(128), nullable=True)
     hpc_island                 = mapped_column(String(128), nullable=True)
     image_id                   = mapped_column(String(128), nullable=True)
+    instance_type              = mapped_column(String(128), nullable=True)
     last_time_reachable        = mapped_column(String(128), nullable=True)
     oci_name                   = mapped_column(String(128), nullable=True)
     ocid                       = mapped_column(String(128), unique=True, nullable=True)
@@ -110,12 +112,14 @@ class Configurations(Base):
     name = mapped_column(String(64), unique=True, nullable=False)
     role = mapped_column(Enum('compute', 'login'), nullable=False)
     partition = mapped_column(String(64), nullable=False)
+    default_partition = mapped_column(Boolean, default=True, nullable=False)
     shape = mapped_column(String(64), nullable=False)
     change_hostname = mapped_column(Boolean, default=True, nullable=False)
     hostname_convention = mapped_column(String(64), nullable=True)
     permanent = mapped_column(Boolean, default=True, nullable=False)
     rdma_enabled = mapped_column(Boolean, default=True, nullable=False)
     stand_alone = mapped_column(Boolean, default=False, nullable=False)
+    max_number_nodes = mapped_column(Integer, nullable=True)
     region = mapped_column(String(64), nullable=True)
     availability_domain = mapped_column(String(64), nullable=True)
     private_subnet_cidr = mapped_column(String(64), nullable=True)
@@ -408,7 +412,7 @@ def get_nodes_with_latest_healthchecks():
         )
         return query_with_global_rec
 
-def get_terminated_nodes_with_latest_healthchecks():
+def get_terminated_nodes_with_latest_healthchecks(delay=None):
     """
     Return TERMINATED nodes with their latest aggregated healthchecks.
 
@@ -455,8 +459,14 @@ def get_terminated_nodes_with_latest_healthchecks():
             ))
             .group_by(TerminatedNodes.ocid)
         )
-
+        if delay is not None:
+            cutoff_time = datetime.now() - timedelta(minutes=int(delay))
+            query = query.filter(
+                cast(TerminatedNodes.terminated_time, DateTime) >= cutoff_time
+            )
         base_subq = query.subquery()
+
+
 
         return session.query(
             base_subq,
@@ -539,6 +549,26 @@ def get_query_by_fields(query, field_dict):
         logger.error(f"Error filtering nodes with fields {field_dict}: {exc}")
         raise
 
+def join_nodes_lists(list1,list2):
+    list1_ocids=[node.ocid for node in list1]
+    list2_ocids=[node.ocid for node in list2]
+    ocids=list(set(list1_ocids).union(set(list2_ocids)))
+    node_list=[]
+    for ocid in ocids:
+        found=False
+        for node1 in list1:
+            if node1.ocid == ocid:
+                node_list.append(node1)
+                found=True
+                break
+        if not found:
+            for node2 in list2:
+                if node2.ocid == ocid:
+                    node_list.append(node2)
+                    found=True
+                    break
+    return node_list
+
 def get_all_nodes():
     """Get all nodes/servers from the database"""
     with DBConn() as session:
@@ -593,81 +623,80 @@ def get_all_nodes_to_configure():
 
 def get_all_nodes_failing_to_start(unreachable_timeout, node_any_list):
     """Get all nodes/servers from the database in waiting_for_info status"""
-    session = query_db()
+    query = get_nodes_with_latest_healthchecks()
+    label_map = {c["name"]: c["expr"] for c in query.column_descriptions if "expr" in c}
     nodes_failing_to_start = []
     current_time = current_utc_time()
     time_th = (current_time - unreachable_timeout).replace(tzinfo=timezone.utc)
-    try:
-        if node_any_list:
-            nodes_waiting_for_info = session.query(Nodes).filter(
-                and_(
-                    Nodes.controller_status.in_(['waiting_for_info']),
-                    or_(
-                        Nodes.ip_address.in_(node_any_list),
-                        Nodes.ocid.in_(node_any_list),
-                        Nodes.serial.in_(node_any_list),
-                        Nodes.hostname.in_(node_any_list),
-                        Nodes.oci_name.in_(node_any_list)
-                    )
+
+    if node_any_list:
+        nodes_waiting_for_info = query.filter(
+            and_(
+                label_map["controller_status"].in_(["waiting_for_info"]),
+                or_(
+                    label_map["ip_address"].in_(node_any_list),
+                    label_map["ocid"].in_(node_any_list),
+                    label_map["serial"].in_(node_any_list),
+                    label_map["hostname"].in_(node_any_list),
+                    label_map["oci_name"].in_(node_any_list)
                 )
-            ).all()
-        else:
-            nodes_waiting_for_info = session.query(Nodes).filter(
-                    Nodes.controller_status.in_(['waiting_for_info'])
-            ).all()
+            )
+        ).all()
+    else:
+        nodes_waiting_for_info = query.filter(label_map["controller_status"].in_(["waiting_for_info"])).all()
+    for node in nodes_waiting_for_info:
+        started_time = datetime.strptime(
+            node.started_time, "%Y-%m-%d %H:%M:%S"
+        ).replace(tzinfo=timezone.utc)
 
-        for node in nodes_waiting_for_info:
-            started_time = datetime.strptime(
-                node.started_time, "%Y-%m-%d %H:%M:%S"
-            ).replace(tzinfo=timezone.utc)
+        if started_time < time_th:
+            nodes_failing_to_start.append(node)
+    return nodes_failing_to_start
 
-            if started_time < time_th:
-                nodes_failing_to_start.append(node)
-        return nodes_failing_to_start
-    finally:
-        session.close()
+
+def get_nodes_slurm_unconfigured():
+    query = get_nodes_with_latest_healthchecks()
+    field_dict = {"role":"compute","slurm_state":"unconfigured"}
+    nodes_slurm_unconfigured = get_query_by_fields(query,field_dict).all()
+    return nodes_slurm_unconfigured
 
 
 def get_all_nodes_unreachable(unreachable_timeout, node_any_list):
     """Get all nodes/servers from the database in waiting_for_info status"""
-    session = query_db()
+    query = get_nodes_with_latest_healthchecks()
+    label_map = {c["name"]: c["expr"] for c in query.column_descriptions if "expr" in c}
     unreachable_nodes = []
     current_time = current_utc_time()
     time_th = (current_time - unreachable_timeout).replace(tzinfo=timezone.utc)
-    try:
-        if node_any_list:
-            configured_nodes = session.query(Nodes).filter(
-                and_(
-                    and_(
-                        Nodes.controller_status.in_(["configured"]),
-                        Nodes.compute_status.in_(["configured", "configuring"])
-                    ),
-                    or_(
-                        Nodes.ip_address.in_(node_any_list),
-                        Nodes.ocid.in_(node_any_list),
-                        Nodes.serial.in_(node_any_list),
-                        Nodes.hostname.in_(node_any_list),
-                        Nodes.oci_name.in_(node_any_list)
-                    )
+    if node_any_list:
+        configured_nodes = query.filter(
+            and_(
+                label_map["controller_status"].in_(["configured"]),
+                or_(
+                    label_map["ip_address"].in_(node_any_list),
+                    label_map["ocid"].in_(node_any_list),
+                    label_map["serial"].in_(node_any_list),
+                    label_map["hostname"].in_(node_any_list),
+                    label_map["oci_name"].in_(node_any_list)
                 )
-            ).all()
-        else:
-            configured_nodes = session.query(Nodes).filter(
-                and_(
-                    Nodes.controller_status.in_(["configured"]),
-                    Nodes.compute_status.in_(["configured", "configuring"])
-                )
-            ).all()
-        for node in configured_nodes:
-            last_time_reachable = datetime.strptime(
-                node.last_time_reachable, "%Y-%m-%d %H:%M:%S"
-            ).replace(tzinfo=timezone.utc)
+            )
+        ).all()
+    else:
+        configured_nodes = query.filter(
+            and_(
+                label_map["controller_status"].in_(["configured"]),
+                label_map["compute_status"].in_(["configured", "configuring"]) 
+            )
+        
+        ).all()
+    for node in configured_nodes:
+        last_time_reachable = datetime.strptime(
+            node.last_time_reachable, "%Y-%m-%d %H:%M:%S"
+        ).replace(tzinfo=timezone.utc)
 
-            if last_time_reachable < time_th:
-                unreachable_nodes.append(node)
-        return unreachable_nodes
-    finally:
-        session.close()
+        if last_time_reachable < time_th:
+            unreachable_nodes.append(node)
+    return unreachable_nodes
 
 
 def get_all_nodes_with_hc_status(hc_status, node_any_list):
@@ -714,7 +743,7 @@ def get_nodes_by_ip(node_ip_list):
 
     query = get_nodes_with_latest_healthchecks()
     label_map = {c["name"]: c["expr"] for c in query.column_descriptions if "expr" in c}
-    nodes = query.filter(label_map["ip_address"].in_(node_id_list)).all()
+    nodes = query.filter(label_map["ip_address"].in_(node_ip_list)).all()
     return nodes
 
 
@@ -727,7 +756,7 @@ def get_nodes_by_serial(node_serial_list):
 
     query = get_nodes_with_latest_healthchecks()
     label_map = {c["name"]: c["expr"] for c in query.column_descriptions if "expr" in c}
-    nodes = query.filter(label_map["serial"].in_(node_id_list)).all()
+    nodes = query.filter(label_map["serial"].in_(node_serial_list)).all()
     return nodes
 
 
@@ -739,7 +768,7 @@ def get_nodes_by_name(node_name_list):
 
     query = get_nodes_with_latest_healthchecks()
     label_map = {c["name"]: c["expr"] for c in query.column_descriptions if "expr" in c}
-    nodes = query.filter(label_map["hostname"].in_(node_id_list)).all()
+    nodes = query.filter(label_map["hostname"].in_(node_name_list)).all()
     return nodes
 
 
@@ -818,7 +847,7 @@ def get_nodes_by_active_hc_expired(active_hc_timeout):
     logger.debug(f"Count after role filter: {query.count()}")
     query = query.filter(label_map["shape"].in_([
         "BM.GPU.H100.8", "BM.GPU.A100-v2.8", "BM.GPU4.8",
-        "BM.GPU.B4.8", "BM.GPU.H200.8", "BM.GPU.GB200.4", "BM.GPU.B200.8", "BM.GPU.GB200-v2.4", "BM.GPU.GB200-v3.4", "BM.GPU.GB300.4", "BM.GPU.MI300X.8"
+        "BM.GPU.B4.8", "BM.GPU.H200.8", "BM.GPU.GB200.4", "BM.GPU.B200.8", "BM.GPU.GB200-v2.4", "BM.GPU.GB200-v3.4", "BM.GPU.GB300.4", "BM.GPU.MI355X.8", "BM.GPU.MI355X-v1.8", "BM.GPU.MI355X-v0.8"
     ]))
     logger.debug(f"Count after shape filter: {query.count()}")
     idle_query = query.filter(label_map["slurm_state"] == "idle")
@@ -874,7 +903,7 @@ def get_nodes_by_multi_node_hc_expired(multi_node_hc_timeout):
     query = query.filter(label_map["shape"].in_([
         "BM.GPU.H100.8", "BM.GPU.A100-v2.8", "BM.GPU4.8",
         "BM.GPU.B4.8", "BM.GPU.H200.8", "BM.GPU.GB200.4",
-        "BM.GPU.B200.8", "BM.GPU.GB200-v2.4", "BM.GPU.GB200-v3.4", "BM.GPU.GB300.4", "BM.GPU.MI300X.8"
+        "BM.GPU.B200.8", "BM.GPU.GB200-v2.4", "BM.GPU.GB200-v3.4", "BM.GPU.GB300.4", "BM.GPU.MI300X.8", "BM.GPU.MI355X.8", "BM.GPU.MI355X-v1.8", "BM.GPU.MI355X-v0.8"
     ]))
     logger.debug(f"Count after shape filter: {query.count()}")
 
@@ -935,7 +964,7 @@ def get_nodes_for_initial_multi_node_check(multi_node_hc_timeout):
     query = query.filter(label_map["shape"].in_([
         "BM.GPU.H100.8", "BM.GPU.A100-v2.8", "BM.GPU4.8",
         "BM.GPU.B4.8", "BM.GPU.H200.8", "BM.GPU.GB200.4",
-        "BM.GPU.B200.8", "BM.GPU.GB200-v2.4", "BM.GPU.GB200-v3.4", "BM.GPU.GB300.4", "BM.GPU.MI300X.8"
+        "BM.GPU.B200.8", "BM.GPU.GB200-v2.4", "BM.GPU.GB200-v3.4", "BM.GPU.GB300.4", "BM.GPU.MI300X.8", "BM.GPU.MI355X.8", "BM.GPU.MI355X-v1.8", "BM.GPU.MI355X-v0.8"
     ]))
     logger.debug(f"Count after shape filter: {query.count()}")
 
@@ -1127,7 +1156,7 @@ def db_update_healthcheck(healthcheck, hc_dict):
         session.commit()
         return True 
     except Exception as exc:
-        logger.error(f"Error updating node {node.ocid}: {exc}")
+        logger.error(f"Error updating node {healthcheck.ocid}: {exc}")
         return False
     finally:
         session.close()
@@ -1175,10 +1204,12 @@ def db_create_node(node_ocid, **kwargs):
         session.close()
 
 
-def db_move_terminated_node(node):
+def db_move_terminated_node(node_row):
     session = query_db()
 
     try:
+        ocid = node_row.ocid if hasattr(node_row, "ocid") else node_row
+        node = session.query(Nodes).filter_by(ocid=ocid).one_or_none()
         # Get shared column names, excluding 'id'
         source_columns = {c.key for c in inspect(Nodes).mapper.column_attrs}
         target_columns = {c.key for c in inspect(TerminatedNodes).mapper.column_attrs}
@@ -1221,6 +1252,7 @@ def db_duplicate_configuration(old_configuration_name, new_configuration_name):
         columns = {c.key for c in inspect(Configurations).mapper.column_attrs} - {'id', 'name'}
         data = {col: getattr(original, col) for col in columns}
         data['name'] = new_configuration_name  # set new name
+        data['default_partition'] = False
 
         # Create and add the new configuration
         new_config = Configurations(**data)
@@ -1255,12 +1287,16 @@ def db_update_configuration(configuration_name, **kwargs):
         ).first()
 
         if not configuration:
-            logger.warning(f"No node found with OCID: {configuration_name}")
+            logger.warning(f"No configuration found: {configuration_name}")
             return False
 
         for key, value in kwargs.items():
             if hasattr(configuration, key):
-                setattr(configuration, key, value)
+                # Special handling for hostname_convention
+                if key == 'hostname_convention' and not configuration.change_hostname:
+                    setattr(configuration, key, value.lower() if value else value)
+                else:
+                    setattr(configuration, key, value)
             else:
                 logger.warning(f"Unknown attribute '{key}' ignored.")
 
@@ -1287,7 +1323,7 @@ def db_delete_configuration(configuration_name):
         ).first()
 
         if not configuration:
-            logger.warning(f"No node found with OCID: {configuration_name}")
+            logger.warning(f"No configuration found with name: {configuration_name}")
             return False
         session.delete(configuration)
         session.commit()
@@ -1311,17 +1347,25 @@ def db_import_configuration(filename):
         for queue in queues:
             instance_types = queue.get("instance_types", [])
             for instance in instance_types:
+                change_hostname = instance.get("change_hostname", True)
+                hostname_convention = instance.get("hostname_convention")
+                
+                # Apply lowercase if change_hostname is False
+                if not change_hostname and hostname_convention:
+                    hostname_convention = hostname_convention.lower()                
                 # Map YAML keys to SQLAlchemy model fields
                 config = Configurations(
                     role="compute",
                     name=instance.get("name"),
+                    default_partition =  queue.get("default"),
                     partition=queue.get("name"),  # using queue name as partition
                     shape=instance.get("shape"),
-                    change_hostname=instance.get("change_hostname", True),
-                    hostname_convention=instance.get("hostname_convention"),
+                    change_hostname=change_hostname,
+                    hostname_convention=hostname_convention,
                     permanent=instance.get("permanent", True),
                     rdma_enabled=instance.get("rdma_enabled", True),
                     stand_alone=instance.get("stand_alone", False),
+                    max_number_nodes=instance.get("max_number_nodes",100),
                     region=instance.get("region"),
                     availability_domain=instance.get("availability_domain"),
                     private_subnet_cidr=instance.get("private_subnet"),
@@ -1351,6 +1395,7 @@ def db_import_configuration(filename):
             config = Configurations(
                 role="login",
                 name=login.get("name"),
+                default_partition =  queue.get("default"),
                 partition=login.get("partition"),
                 shape=login.get("shape"),
                 change_hostname=login.get("change_hostname", True),
@@ -1365,6 +1410,7 @@ def db_import_configuration(filename):
                 image_id=login.get("image_id"),
                 target_compartment_id=login.get("target_compartment_id"),
                 boot_volume_size=login.get("boot_volume_size", 50),
+                max_number_nodes=login.get("max_number_nodes", 100),
                 use_marketplace_image=login.get("use_marketplace_image", True),
                 instance_pool_ocpus=login.get("instance_pool_ocpus"),
                 instance_pool_custom_memory=login.get("instance_pool_custom_memory", False),

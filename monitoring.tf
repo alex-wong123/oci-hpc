@@ -52,7 +52,6 @@ resource "oci_dns_rrset" "rrset-monitoring" {
     rdata  = var.monitoring_node ? oci_core_instance.monitoring[0].private_ip : ""
     ttl    = 3600
   }
-  scope   = "PRIVATE"
   view_id = data.oci_dns_views.dns_views.views[0].id
 }
 
@@ -95,7 +94,7 @@ resource "oci_sch_service_connector" "telegraf_service_connector" {
       namespace_details {
         kind = "selected"
         dynamic "namespaces" {
-          for_each = ["oci_blockstore", "oci_fastconnect", "oci_filestorage", "oci_internet_gateway", "oci_lustrefilesystem", "oci_objectstorage", "oci_nat_gateway", "oci_service_gateway", "oci_vcn", "oci_dynamic_routing_gateway"] # "gpu_infrastructure_health", "rdma_infrastructure_health"
+          for_each = ["oci_blockstore", "oci_fastconnect", "oci_filestorage", "oci_internet_gateway", "oci_lustrefilesystem", "oci_nat_gateway", "oci_service_gateway", "oci_vcn", "oci_dynamic_routing_gateway"] # "gpu_infrastructure_health", "rdma_infrastructure_health"
           content {
             metrics {
               kind = "all"

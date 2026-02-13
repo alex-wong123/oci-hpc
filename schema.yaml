@@ -206,7 +206,6 @@ variableGroups:
       - ${vcn_subnet}
       - ${public_subnet}
       - ${private_subnet}
-      - ${rdma_subnet}
       - ${additional_subnet}
       - ${zone_name}
 
@@ -247,6 +246,7 @@ variableGroups:
       - ${OCI_generated_container_namespace}
       - ${OCI_generated_container_name}
       - ${wildcard_dns_domain}
+      - ${rdma_subnet}
     visible: false
 
 
@@ -288,7 +288,8 @@ variables:
 
   cluster_name:
     title: "Cluster name"
-    description: "Custom cluster name."
+    description: "The custom cluster name must be lower case letters, digits and - only."
+    pattern: "^[-a-z0-9]+$"
     default: ""
     type: string
     visible:
@@ -1247,7 +1248,7 @@ variables:
     type: boolean
     title: "Install Nvidia Enroot for containerized GPU workloads"
     default: true
-    description: "Install Enroot, Nvidia Container Toolkit, and docker."
+    description: "Install Enroot, either the Nvidia or AMD Container Toolkit, and docker."
     visible: ${slurm}
 
   cluster_monitoring:

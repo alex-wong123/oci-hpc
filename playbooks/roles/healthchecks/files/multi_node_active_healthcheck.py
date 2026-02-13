@@ -34,7 +34,7 @@ shape_mapping = {
     },
     "BM.GPU.A100-v2.8": {
         "var_UCX_NET_DEVICES": "mlx5_0:1",
-        "var_NCCL_IB_HCA": "=mlx5_5,mlx5_6,mlx5_7,mlx5_8,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_14,mlx5_15,mlx5_16,mlx5_17,mlx5_9,mlx5_10,mlx5_11,mlx5_1",
+        "var_NCCL_IB_HCA": "=mlx5_5,mlx5_6,mlx5_7,mlx5_8,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_14,mlx5_15,mlx5_16,mlx5_17,mlx5_9,mlx5_10,mlx5_11,mlx5_12",
         "threshold": 185,
         "ib_write_bw": 96,
         "ib_write_lat": 5
@@ -102,6 +102,27 @@ shape_mapping = {
     "BM.GPU.MI300X.8": {
         "var_UCX_NET_DEVICES": "mlx5_0:1",
         "var_NCCL_IB_HCA": "=mlx5_0,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_7,mlx5_8,mlx5_9",
+        "threshold": 350,
+        "ib_write_bw": 350,
+        "ib_write_lat": 5
+    },
+    "BM.GPU.MI355X.8": {
+        "var_UCX_NET_DEVICES": "mlx5_8:1",
+        "var_NCCL_IB_HCA": "=mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7",
+        "threshold": 350,
+        "ib_write_bw": 350,
+        "ib_write_lat": 5
+    },
+    "BM.GPU.MI355X-v0.8": {
+        "var_UCX_NET_DEVICES": "mlx5_8:1",
+        "var_NCCL_IB_HCA": "=mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7",
+        "threshold": 350,
+        "ib_write_bw": 350,
+        "ib_write_lat": 5
+    },
+    "BM.GPU.MI355X-v1.8": {
+        "var_UCX_NET_DEVICES": "mlx5_8:1",
+        "var_NCCL_IB_HCA": "=mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7",
         "threshold": 350,
         "ib_write_bw": 350,
         "ib_write_lat": 5
@@ -354,7 +375,7 @@ def run_multi_node_rccl_test(hostfile, shape):
     if var_UCX_NET_DEVICES == "":
         return False,"RCCL Test Failed: Shape not found for RCCL test"
     var_NCCL_IB_HCA = shape_mapping.get(shape, {}).get('var_NCCL_IB_HCA', '')
-    if shape in ("BM.GPU.MI300X.8"):
+    if "BM.GPU.MI" in shape:
         mpirun_cmd = [
             "mpirun", "--mca", "pml", "ucx",
             "--bind-to", "numa",

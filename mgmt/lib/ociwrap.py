@@ -76,6 +76,17 @@ class OCIClients:
 
 CLIENTS = OCIClients()
 
+def get_console_history(node):
+    # Capture console history for the instance
+    try:
+        console_history_response = CLIENTS.compute_client_composite_operations.capture_console_history_and_wait_for_state(oci.core.models.CaptureConsoleHistoryDetails(
+            instance_id=node.ocid), wait_for_states=["SUCCEEDED", "FAILED"])
+        console_history_id = console_history_response.data.id
+        console_history_data = CLIENTS.compute_client.get_console_history_content(console_history_id).data
+        return console_history_data
+    except oci.exceptions.ServiceError as e:
+        logger.error(f"Error capturing console history for instance {node.ocid}: {e}")
+        return None
 
 def list_custom_images(compartment_ocid):
     try:
@@ -199,32 +210,58 @@ def run_tag(node):
         logger.error("The tag does not exists or the controller doesn't have acces to the tag")
         logger.error("Make sure the Tag namespace ComputeInstanceHostActions exists with the defined tag: CustomerReportedHostStatus")
 
-def run_add(nodes, count, names):
+def run_add(nodes, count, names, cluster, compartment_ocid):
     if not nodes:
-        logger.error("The resize script cannot work for a cluster if there are no nodes in the cluster")
-        sys.exit(1)
-    for first_node in nodes:
-        if "GPU.GB" in first_node.shape:
-            memory_clusters = oci.pagination.list_call_get_all_results(CLIENTS.compute_client.list_compute_gpu_memory_clusters, first_node.compartment_id, display_name=first_node.memory_cluster_name).data
-            for memory_cluster in memory_clusters:
-                mc_id=memory_cluster.id
-                instance_summaries = oci.pagination.list_call_get_all_results(CLIENTS.compute_client.list_compute_gpu_memory_cluster_instances, mc_id).data
-                for instance_summary in instance_summaries:
-                    if instance_summary.id == first_node.ocid:
-                        memory_cluster_data=CLIENTS.compute_client.get_compute_gpu_memory_cluster(mc_id).data
-                        cc_id=memory_cluster_data.compute_cluster_id
-                        instance_config_id=memory_cluster_data.instance_configuration_id
-                        cluster_type="MC"
-                        cluster_ocid=mc_id
-                        cluster_name=memory_cluster_data.display_name
+        if cluster is None:
+            logger.error("The resize script cannot work for a cluster if there are no nodes in the cluster")
+            sys.exit(1)
         else:
-            logger.debug(f"The first node name is {first_node.hostname}")
-            cluster_type,cluster_ocid,instance_pool_ocid = get_instance_type(first_node)
-            cluster_name=first_node.cluster_name
-            logger.debug(f"The detected type is {cluster_type} and the cluster name is {cluster_name}")
-        if not cluster_type is None:
-            break
-    current_size=get_instance_count(cluster_type,cluster_ocid,first_node.compartment_id,cluster_name)
+            logger.debug("No nodes found, checking if there is a Cluster Network with that name")
+            clusters=CLIENTS.compute_management_client.list_cluster_networks(compartment_id=compartment_ocid,display_name=cluster,lifecycle_state="RUNNING").data
+            if not clusters:
+                instance_pools=CLIENTS.compute_management_client.list_instance_pools(compartment_id=compartment_ocid,display_name=cluster,lifecycle_state="RUNNING").data
+                if not instance_pools:
+                    logger.error("No cluster found with name: {}".format(cluster))
+                    sys.exit(1)
+                elif len(instance_pools) > 1:
+                    logger.error("Multiple clusters found with name: {}".format(cluster))
+                    sys.exit(1)  
+                else:
+                    cluster_type="IPA"
+                    cluster_ocid=instance_pools[0].id
+                    instance_pool_ocid=instance_pools[0].id
+                    cluster_name=instance_pools[0].display_name
+            elif len(clusters) > 1:
+                logger.error("Multiple clusters found with name: {}".format(cluster))
+                sys.exit(1)
+            else:
+                cluster_type="CN"
+                cluster_ocid=clusters[0].id
+                instance_pool_ocid=clusters[0].instance_pools[0].id
+                cluster_name=clusters[0].display_name
+    if nodes:
+        for first_node in nodes:
+            if "GPU.GB" in first_node.shape:
+                memory_clusters = oci.pagination.list_call_get_all_results(CLIENTS.compute_client.list_compute_gpu_memory_clusters, first_node.compartment_id, display_name=first_node.memory_cluster_name).data
+                for memory_cluster in memory_clusters:
+                    mc_id=memory_cluster.id
+                    instance_summaries = oci.pagination.list_call_get_all_results(CLIENTS.compute_client.list_compute_gpu_memory_cluster_instances, mc_id).data
+                    for instance_summary in instance_summaries:
+                        if instance_summary.id == first_node.ocid:
+                            memory_cluster_data=CLIENTS.compute_client.get_compute_gpu_memory_cluster(mc_id).data
+                            cc_id=memory_cluster_data.compute_cluster_id
+                            instance_config_id=memory_cluster_data.instance_configuration_id
+                            cluster_type="MC"
+                            cluster_ocid=mc_id
+                            cluster_name=memory_cluster_data.display_name
+            else:
+                logger.debug(f"The first node name is {first_node.hostname}")
+                cluster_type,cluster_ocid,instance_pool_ocid = get_instance_type(first_node)
+                cluster_name=first_node.cluster_name
+                logger.debug(f"The detected type is {cluster_type} and the cluster name is {cluster_name}")
+            if not cluster_type is None:
+                break
+    current_size=get_instance_count(cluster_type,cluster_ocid,compartment_ocid,cluster_name)
     logger.debug(f"The detected type is {cluster_type} with a size of {current_size}")
     target_size = current_size + count
     logger.debug(f"The target size is {target_size}")
@@ -258,7 +295,7 @@ def run_add(nodes, count, names):
         update_size = oci.core.models.UpdateInstancePoolDetails(size=target_size)
         logger.info(f"Launching {count} in the Cluster for a total size of {target_size}")
         CLIENTS.compute_management_client_composite_operations.update_instance_pool_and_wait_for_state(instance_pool_ocid,update_size,['RUNNING'],waiter_kwargs={'max_wait_seconds':3600})
-    newsize=get_instance_count(cluster_type,cluster_ocid,first_node.compartment_id,first_node.cluster_name)
+    newsize=get_instance_count(cluster_type,cluster_ocid,compartment_ocid,cluster_name)
     if cluster_type != "MC":
         logger.info(f"Total number of nodes in the cluster is now {newsize} with a requested size of {target_size}")
         if newsize == current_size:
@@ -910,7 +947,10 @@ def generate_inventory(config,cluster_name):
     modifications={"cluster_name":cluster_name,
                 "shape":config.shape,
                 "rdma_enabled":config.rdma_enabled,
-                "hostname_convention": config.hostname_convention
+                "queue":config.partition,
+                "instance_type": config.name,
+                "hostname_convention": config.hostname_convention,
+                "hyperthreading": config.hyperthreading
                 }
     try:
         with open(original_inventory, 'r') as file:
@@ -1089,10 +1129,10 @@ def update_dns(instance_ocid, zone_name, compartment_ocid, instance_launch, host
     if instance_launch:
         private_ip = get_private_ip(instance_ocid,compartment_ocid)
 
-        get_rr_set_response = CLIENTS.dns_client.update_rr_set(zone_name_or_id=zone_id,domain=hostname+"."+zone_name,rtype="A",scope="PRIVATE",update_rr_set_details=oci.dns.models.UpdateRRSetDetails(items=[oci.dns.models.RecordDetails(domain=hostname+"."+zone_name,rdata=private_ip,rtype="A",ttl=3600,)]))
+        get_rr_set_response = CLIENTS.dns_client.update_rr_set(zone_name_or_id=zone_id,domain=hostname+"."+zone_name,rtype="A",update_rr_set_details=oci.dns.models.UpdateRRSetDetails(items=[oci.dns.models.RecordDetails(domain=hostname+"."+zone_name,rdata=private_ip,rtype="A",ttl=3600,)]))
         logger.info(f"DNS updated for instance launch with IP {private_ip} and {hostname}")
     else:
-        get_rr_set_response = CLIENTS.dns_client.delete_rr_set(zone_name_or_id=zone_id,domain=hostname+"."+zone_name,rtype="A",scope="PRIVATE") 
+        get_rr_set_response = CLIENTS.dns_client.delete_rr_set(zone_name_or_id=zone_id,domain=hostname+"."+zone_name,rtype="A") 
         logger.info(f"DNS updated for instance terminated with hostname: {hostname}")
 
 def update_display_name(instance_ocid, new_hostname):
